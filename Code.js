@@ -1,126 +1,99 @@
-/**
- * GOOGLE SHEETS AUTOMATION WITH GEMINI AI
- * 
- * Setup Instructions:
- * 1. Replace "YOUR_GEMINI_API_KEY" with your own key from Google AI Studio.
- * 2. Configure an Installed Trigger in Apps Script:
- *    - Click on the clock icon (Triggers) on the left menu.
- *    - Click "Add Trigger".
- *    - Choose which function to run: "automatisationGeminiForm".
- *    - Select event type: "On edit".
- */
+// ====== CONFIGURATION ======
+const API_KEY = "AQ.....API_KEY";
+// Utilisation du modèle stable mis à jour gemini-2.5-flash pour corriger l'erreur 404
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=" + API_KEY;
 
+/**
+ * Fonction déclenchée par le Trigger "On edit" lors de la modification de F4
+ */
 function automatisationGeminiForm(e) {
   if (!e) return;
   
-  var range = e.range;
-  var sheet = range.getSheet();
+  const sheet = e.source.getActiveSheet();
+  const range = e.range;
   
-  // Strictly runs on the input cell F4 of 'Sheet1'
-  if (sheet.getName() === "Sheet1" && range.getA1Notation() === "F4") {
-    var input = range.getValue().toString().trim();
-    if (input === "") return;
+  if (sheet.getName() !== "Sheet1" || range.getA1Notation() !== "F4") return;
+  
+  const voiceInput = range.getValue().toString().trim();
+  if (voiceInput === "") return;
+  
+  // On demande explicitement une structure JSON pure dans le prompt
+  const prompt = "Extract the following entities from this text: Title (Mr, Mrs, Dr, etc.), Full Name, Email Address, and Phone Number. " +
+                 "Return ONLY a clean JSON object with keys: 'title', 'name', 'email', 'phone'. " +
+                 "Do not wrap the response in markdown code blocks like ```json ... ```. Output raw JSON string only. " +
+                 "Text to analyze: " + voiceInput;
+                 
+  const payload = {
+    "contents": [{
+      "parts": [{
+        "text": prompt
+      }]
+    }]
+  };
+  
+  const options = {
+    "method": "post",
+    "contentType": "application/json",
+    "payload": JSON.stringify(payload),
+    "muteHttpExceptions": true
+  };
+  
+  try {
+    const response = UrlFetchApp.fetch(GEMINI_URL, options);
+    const jsonResponse = JSON.parse(response.getContentText());
     
-    // Set your Gemini API Key here
-    var apiKey = "Gemini_API_Key"; 
-    var url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + apiKey;
-    
-    // Prompt engineered to request strict JSON extraction
-    var prompt = "Extract the following details from this text: Title (like Mr, Mrs, Ms, Dr), Full Name, Email, and Phone Number. " +
-                 "Text: '" + input + "'. " +
-                 "Respond ONLY with a valid JSON object containing these keys: 'title', 'fullName', 'email', 'phone'. " +
-                 "Do not include any markdown formatting like ```json or wrappers. Just the raw JSON.";
-    
-    var payload = {
-      "contents": [{ "parts": [{ "text": prompt }] }],
-      "generationConfig": { 
-        "temperature": 0.1,
-        "responseMimeType": "application/json" // Forces the API to output native JSON structure
-      }
-    };
-    
-    var options = {
-      "method": "post",
-      "contentType": "application/json",
-      "payload": JSON.stringify(payload),
-      "muteHttpExceptions": true
-    };
-    
-    try {
-      var response = UrlFetchApp.fetch(url, options);
-      
-      if (response.getResponseCode() === 200) {
-        var jsonText = response.getContentText().trim();
-        
-        // Safety cleanup if the model accidentally wraps text in Markdown blocks
-        jsonText = jsonText.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
-        
-        var aiResult = JSON.parse(jsonText);
-        
-        // Anti-parsing error fix (#ERROR!) for phone numbers starting with "+"
-        var phoneVal = aiResult.phone ? aiResult.phone.toString() : "";
-        if (phoneVal.startsWith("+")) {
-          phoneVal = "'" + phoneVal;
-        }
-        
-        // Populating the UI form fields
-        sheet.getRange("C2").setValue(aiResult.title || "");
-        sheet.getRange("C4").setValue(aiResult.fullName || "");
-        sheet.getRange("C6").setValue(aiResult.email || "");
-        sheet.getRange("C8").setValue(phoneVal);
-        
-      } else {
-        SpreadsheetApp.getUi().alert("Gemini API Error: " + response.getContentText());
-      }
-    } catch (err) {
-      SpreadsheetApp.getUi().alert("Execution Error: " + err.toString());
+    if (jsonResponse.error) {
+      SpreadsheetApp.getUi().alert("Gemini API Error: " + JSON.stringify(jsonResponse.error, null, 2));
+      return;
     }
+    
+    // Extraction du texte généré
+    let rawJsonText = jsonResponse.candidates[0].content.parts[0].text.trim();
+    
+    // Nettoyage de sécurité si l'IA ajoute quand même des balises Markdown
+    if (rawJsonText.startsWith("```")) {
+      rawJsonText = rawJsonText.replace(/^```json/, "").replace(/^```/, "").replace(/```$/, "").trim();
+    }
+    
+    const data = JSON.parse(rawJsonText);
+    
+    // Remplissage des cases du formulaire
+    sheet.getRange("C2").setValue(data.title || "");
+    sheet.getRange("C4").setValue(data.name || "");
+    sheet.getRange("C6").setValue(data.email || "");
+    sheet.getRange("C8").setValue(data.phone || "");
+    
+  } catch (error) {
+    SpreadsheetApp.getUi().alert("Script Error: " + error.toString());
   }
 }
 
 /**
- * BLUE BUTTON ACTION: Saves historical data to Sheet2 and resets the form UI
+ * Fonction assignée au bouton bleu (Sauvegarde et Réinitialisation)
  */
 function saveAndClearForm() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var formSheet = ss.getSheetByName("Sheet1"); 
-  var dataSheet = ss.getSheetByName("Sheet2"); 
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet1 = ss.getSheetByName("Sheet1");
+  const sheet2 = ss.getSheetByName("Sheet2");
   
-  // Automatically creates Sheet2 if it doesn't exist yet
-  if (!dataSheet) {
-    dataSheet = ss.insertSheet("Sheet2");
-  }
+  const title = sheet1.getRange("C2").getValue();
+  const name = sheet1.getRange("C4").getValue();
+  const email = sheet1.getRange("C6").getValue();
+  const phone = sheet1.getRange("C8").getValue();
   
-  var title = formSheet.getRange("C2").getValue().toString();
-  var fullName = formSheet.getRange("C4").getValue().toString();
-  var email = formSheet.getRange("C6").getValue().toString();
-  var phoneValue = formSheet.getRange("C8").getValue().toString();
-  
-  // Minimum validation: stops the process if the form is empty
-  if (title === "" && fullName === "") {
-    SpreadsheetApp.getUi().alert("The form is completely empty!");
+  if (!title && !name && !email && !phone) {
+    SpreadsheetApp.getUi().alert("The form is empty!");
     return;
   }
   
-  // Double safety measure for phone format right before logging into Sheet2 row
-  if (phoneValue.startsWith("+")) {
-    phoneValue = "'" + phoneValue;
-  }
-
-  // Appending data to the database tab
-  var values = [new Date(), title, fullName, email, phoneValue];
-  dataSheet.appendRow(values); 
+  const timestamp = new Date();
+  sheet2.appendRow([timestamp, title, name, email, phone]);
   
-  // Forces Google Sheets to refresh UI rendering instantly
-  SpreadsheetApp.flush(); 
+  sheet1.getRange("F4").clearContent();
+  sheet1.getRange("C2").clearContent();
+  sheet1.getRange("C4").clearContent();
+  sheet1.getRange("C6").clearContent();
+  sheet1.getRange("C8").clearContent();
   
-  // Complete form UI cleanup
-  formSheet.getRange("C2").clearContent();
-  formSheet.getRange("C4").clearContent();
-  formSheet.getRange("C6").clearContent();
-  formSheet.getRange("C8").clearContent();
-  formSheet.getRange("F4").clearContent(); // Clears voice input field
-  
-  // Confirmation popup
-  SpreadsheetApp.getUi().alert("Gemini AI successfully processed your voice and saved the data!");
+  SpreadsheetApp.getUi().alert("Data successfully saved to Sheet2!");
 }
