@@ -1,27 +1,38 @@
 // ====== CONFIGURATION ======
-const API_KEY = "AQ.....API_KEY";
-// Utilisation du modèle stable mis à jour gemini-2.5-flash pour corriger l'erreur 404
+const API_KEY = "your API_KEY";
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=" + API_KEY;
 
 /**
- * Fonction déclenchée par le Trigger "On edit" lors de la modification de F4
+ * Fonction automatique déclenchée lors de la modification de la feuille
  */
-function automatisationGeminiForm(e) {
-  if (!e) return;
+function onEdit(e) {
+  // Sécurité essentielle pour éviter l'erreur de ta capture d'écran image_8c32c0.png
+  if (!e || !e.range) return;
   
   const sheet = e.source.getActiveSheet();
   const range = e.range;
   
-  if (sheet.getName() !== "Sheet1" || range.getA1Notation() !== "F4") return;
+  // On vérifie qu'on est sur l'onglet "Orders" et sur la cellule B2
+  if (sheet.getName() !== "Orders" || range.getA1Notation() !== "B2") return;
   
-  const voiceInput = range.getValue().toString().trim();
-  if (voiceInput === "") return;
+  const voiceQuery = range.getValue().toString().trim();
   
-  // On demande explicitement une structure JSON pure dans le prompt
-  const prompt = "Extract the following entities from this text: Title (Mr, Mrs, Dr, etc.), Full Name, Email Address, and Phone Number. " +
-                 "Return ONLY a clean JSON object with keys: 'title', 'name', 'email', 'phone'. " +
-                 "Do not wrap the response in markdown code blocks like ```json ... ```. Output raw JSON string only. " +
-                 "Text to analyze: " + voiceInput;
+  // Si on efface le texte de B2, on nettoie la réponse en F2
+  if (voiceQuery === "") {
+    sheet.getRange("F2").clearContent();
+    return;
+  }
+  
+  // Lancement du processus
+  sheet.getRange("F2").setValue("🔍 Searching...");
+  SpreadsheetApp.flush(); 
+  
+  const prompt = "Analyze this search query: '" + voiceQuery + "'. " +
+                 "Extract filters for a sales database. Available columns to filter by: 'Customer Name', 'State', 'Category'. " +
+                 "Also identify what numeric column the user wants to calculate: 'Sales' or 'Profit'. " +
+                 "Return ONLY a clean JSON object with keys: " +
+                 "'customer' (string or null), 'state' (string or null), 'category' (string or null), 'metric' ('Sales' or 'Profit'). " +
+                 "Do not wrap the response in markdown code blocks like ```json ... ```. Output raw JSON string only.";
                  
   const payload = {
     "contents": [{
@@ -43,57 +54,77 @@ function automatisationGeminiForm(e) {
     const jsonResponse = JSON.parse(response.getContentText());
     
     if (jsonResponse.error) {
-      SpreadsheetApp.getUi().alert("Gemini API Error: " + JSON.stringify(jsonResponse.error, null, 2));
+      sheet.getRange("F2").setValue("⚠️ API Error");
       return;
     }
     
-    // Extraction du texte généré
     let rawJsonText = jsonResponse.candidates[0].content.parts[0].text.trim();
     
-    // Nettoyage de sécurité si l'IA ajoute quand même des balises Markdown
     if (rawJsonText.startsWith("```")) {
       rawJsonText = rawJsonText.replace(/^```json/, "").replace(/^```/, "").replace(/```$/, "").trim();
     }
     
-    const data = JSON.parse(rawJsonText);
+    const criteria = JSON.parse(rawJsonText);
+    const result = searchAndCalculate(sheet, criteria);
     
-    // Remplissage des cases du formulaire
-    sheet.getRange("C2").setValue(data.title || "");
-    sheet.getRange("C4").setValue(data.name || "");
-    sheet.getRange("C6").setValue(data.email || "");
-    sheet.getRange("C8").setValue(data.phone || "");
+    // Affichage final en F2
+    sheet.getRange("F2").setValue(result);
     
   } catch (error) {
-    SpreadsheetApp.getUi().alert("Script Error: " + error.toString());
+    sheet.getRange("F2").setValue("⚠️ Error");
   }
 }
 
 /**
- * Fonction assignée au bouton bleu (Sauvegarde et Réinitialisation)
+ * Fonction interne de recherche (Ligne 6 = en-têtes, donc index 5)
  */
-function saveAndClearForm() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet1 = ss.getSheetByName("Sheet1");
-  const sheet2 = ss.getSheetByName("Sheet2");
+function searchAndCalculate(sheet, criteria) {
+  const rows = sheet.getDataRange().getValues();
   
-  const title = sheet1.getRange("C2").getValue();
-  const name = sheet1.getRange("C4").getValue();
-  const email = sheet1.getRange("C6").getValue();
-  const phone = sheet1.getRange("C8").getValue();
+  // SEULE MODIFICATION : 5 au lieu de 3 pour cibler la ligne 6 (vos en-têtes)
+  const idxHeaderRow = 5; 
   
-  if (!title && !name && !email && !phone) {
-    SpreadsheetApp.getUi().alert("The form is empty!");
-    return;
+  if (rows.length <= idxHeaderRow + 1) return "No data found.";
+  
+  const headers = rows[idxHeaderRow];
+  const idxCustomer = headers.indexOf("Customer Name");
+  const idxState = headers.indexOf("State");
+  const idxCategory = headers.indexOf("Category");
+  const idxMetric = headers.indexOf(criteria.metric || "Sales");
+  
+  if (idxMetric === -1) return "Column not found.";
+  
+  let total = 0;
+  let matchCount = 0;
+  
+  for (let i = idxHeaderRow + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row[0]) continue; 
+    
+    let match = true;
+    
+    if (criteria.customer && row[idxCustomer].toString().toLowerCase().indexOf(criteria.customer.toLowerCase()) === -1) {
+      match = false;
+    }
+    if (criteria.state && row[idxState].toString().toLowerCase().indexOf(criteria.state.toLowerCase()) === -1) {
+      match = false;
+    }
+    if (criteria.category && row[idxCategory].toString().toLowerCase().indexOf(criteria.category.toLowerCase()) === -1) {
+      match = false;
+    }
+    
+    if (match) {
+      let rawValue = row[idxMetric].toString().replace(/\s/g, "").replace(",", ".");
+      const value = parseFloat(rawValue);
+      if (!isNaN(value)) {
+        total += value;
+      }
+      matchCount++;
+    }
   }
   
-  const timestamp = new Date();
-  sheet2.appendRow([timestamp, title, name, email, phone]);
+  if (matchCount === 0) return "No matching entries.";
   
-  sheet1.getRange("F4").clearContent();
-  sheet1.getRange("C2").clearContent();
-  sheet1.getRange("C4").clearContent();
-  sheet1.getRange("C6").clearContent();
-  sheet1.getRange("C8").clearContent();
-  
-  SpreadsheetApp.getUi().alert("Data successfully saved to Sheet2!");
+  const formattedTotal = total.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+  return "Total " + criteria.metric + ": " + formattedTotal + " (" + matchCount + " orders)";
 }
